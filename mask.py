@@ -1,4 +1,5 @@
 import dlib
+import sys
 import cv2
 import numpy as np
 from PIL import Image
@@ -14,6 +15,8 @@ MASK_PATH = "./input_mask.png"
 MASK_COLOR = (0.0, 0.0, 0.0)
 RIGHT_EYE_POINTS = list(range(36, 42))
 LEFT_EYE_POINTS = list(range(42, 48))
+MASK_FACE_WIDTH = 400.0
+MASK_IMAGE_WIDTH = 632.0
 
 detector = dlib.get_frontal_face_detector()
 predictor = dlib.shape_predictor(PREDICTOR_PATH)
@@ -67,9 +70,39 @@ def load_image(path):
     return Image.open(path)
 
 
+def get_center_from_quad(left, upper, right, bottom):
+    return (left + ((right - left) / 2), upper + ((bottom - upper) / 2))
+
+
+def quad_from_center_sides(center, width, height):
+    x, y = center
+    left = x - width / 2
+    right = x + width / 2
+    upper = y - height / 2
+    bottom = y + height / 2
+    return left, upper, right, bottom
+
+
+def crop_to_face(face, cropping_layer, landmarks):
+    left, upper, right, bottom = get_face_quad(landmarks)
+    scale_factor = MASK_FACE_WIDTH / float(right - left)
+    copy = face.copy()
+    resized_face = copy.resize((int(round(face.size[0] * scale_factor)), int(round(face.size[1] * scale_factor))))
+    landmarks = get_face_landmarks(resized_face)
+    center = get_center_from_quad(*get_face_quad(landmarks))
+    width, height = cropping_layer.size
+
+    cropped = resized_face.crop(quad_from_center_sides(center, width, height))
+    cropped.putalpha(255)  # convert RGB to RGBA for melding
+    return cropped
+
+
 def meld_layers(input_layer, melding_layer, landmarks):
-    img = correct_colours(np.array(input_layer), np.array(melding_layer), landmarks)
-    return Image.fromarray(img)
+    cropped_face = crop_to_face(input_layer, melding_layer, landmarks)
+    # img = correct_colours(np.array(cropped_face), np.array(melding_layer), landmarks)
+    copy = cropped_face.copy()
+    copy.paste(melding_layer, (0, 0), melding_layer)
+    return copy
 
 def get_holes(image, thresh):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -128,48 +161,18 @@ class Rect(object):
         pass
 
 
-def resize_face_to_mask(face_quad, face_image, mask_image):
-    """ Crop out face and resize to fit mask """
-    # rotate using quad
-    # find center using quad
-    # crop to size of mask
-    rect = Rect(*face_quad)
-    face_image.crop(rect.to_points())
-    return remove_background(face_image, 170)
-
-
-def correct_colours(im1, im2, landmarks1):
-    # Amount of blur to use during colour correction, as a fraction of the pupillary distance.
-    COLOUR_CORRECT_BLUR_FRAC = 0.6
-    blur_amount = COLOUR_CORRECT_BLUR_FRAC * np.linalg.norm(
-            np.mean(landmarks1[LEFT_EYE_POINTS], axis=0) -
-            np.mean(landmarks1[RIGHT_EYE_POINTS], axis=0))
-    blur_amount = int(blur_amount)
-    if blur_amount % 2 == 0:
-        blur_amount += 1
-    im1_blur = cv2.GaussianBlur(im1, (blur_amount, blur_amount), 0)
-    im2_blur = cv2.GaussianBlur(im2, (blur_amount, blur_amount), 0)
-
-    # Avoid divide-by-zero errors.
-    im2_blur += (128 * (im2_blur <= 1.0)).astype(im2_blur.dtype)
-
-    return (im2.astype(np.float64) * im1_blur.astype(np.float64) / im2_blur.astype(np.float64))
-
-
 # Actual Script
-image_path = 'cage.jpg'
+if len(sys.argv) != 2:
+    raise Exception("Please pass in path to face image")
+image_path = sys.argv[1]
 face_image = load_image(image_path)
 mask = get_mask()
-background = create_background(mask)
+background = create_background(mask.copy())
 
-landmarks = get_face_landmarks(face_image)
+landmarks = get_face_landmarks(face_image.copy())
 quad = get_face_quad(landmarks)
-new_face = resize_face_to_mask(face_quad=quad,
-                               face_image=face_image.copy(),
-                               mask_image=mask.copy())
+new_face = remove_background(face_image.copy(), 170)
 
-# TODO: need to crop new face to mask size before melding
-masked_face = meld_layers(new_face, mask, landmarks)
-new_face.save("face.png")
-new_img = background.paste(masked_face, box=(0, 0))
-masked_face.save("out.png")
+masked_face = meld_layers(new_face.copy(), mask.copy(), landmarks)
+background.paste(masked_face.copy(), (0, 0), masked_face)
+background.save("out.png")
